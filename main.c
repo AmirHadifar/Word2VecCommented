@@ -19,8 +19,8 @@
 #include <pthread.h>
 
 #define MAX_STRING 100 // maximum length of words read from file
-#define EXP_TABLE_SIZE 1000 // for finding sigmoid function approximately
-#define MAX_EXP 6 // our range of approximation for sigmoid
+#define EXP_TABLE_SIZE 1000 // Expotenial Table Size, Provides 1000 Temporary Results
+#define MAX_EXP 6 // From -6 (exp^-6 / (exp^-6 + 1)) to 6 (exp^6 / (exp^6 + 1))
 #define MAX_SENTENCE_LENGTH 1000 // maximum length of each sentence (sentences separated by </s> or \n)
 #define MAX_CODE_LENGTH 40 // used in Huffman coding (max length of Huffman code)
 
@@ -39,9 +39,10 @@ typedef float real;                    // Precision of float numbers
  * ======== vocab_word ========
  * Properties:
  *   cn - The word frequency (number of times it appears).
+ *   point - Path From Root To The Word in Huffman Tree, Store Every Index of Non-Leaf Node
  *   word - The actual string word.
  *   code - huffman coding for hierarchical softmax
- *   codelen - length of huffman code for this word
+ *   codelen - Length of huffman code for this word
  */
 struct vocab_word {
     long long cn;
@@ -90,7 +91,8 @@ int *vocab_hash;
 long long vocab_max_size = 1000, vocab_size = 0, layer1_size = 100;
 
 /*
- *
+ * ======== train_words ========
+ * Training Words Number(Accumulation of Word Frequency)
  */
 long long train_words = 0, word_count_actual = 0, iter = 5, file_size = 0, classes = 0;
 
@@ -107,6 +109,13 @@ long long train_words = 0, word_count_actual = 0, iter = 5, file_size = 0, class
  */
 real alpha = 0.025, starting_alpha, sample = 1e-3;
 
+/* ======== syn0 ========
+ * Concatenate word vectors
+ * ======== syn1 ========
+ * Weight from Hidden Layer to Non-Leaf Node in Huffman Tree in Hierarchical Softmax
+ * ======== syn1neg ========
+ * Weight from Hidden Layer to Class in Negative Sampling
+*/
 real *syn0, *syn1, *syn1neg, *expTable;
 clock_t start;
 
@@ -662,20 +671,34 @@ void InitNet() {
 void *TrainModelThread(void *id) {
 
     /*
-     * word - Stores the index of a word in the vocab table.
-     * word_count - Stores the total number of training words processed.
-     */
+     * word - Add Word to sen; Represent Current Word When Sentence Completed
+     * (Stores the index of a word in the vocab table)
+     * last_word - Prior Word, Used for Window Scan
+     * sentence_length - Current Sentence Length
+     * sentence_position - Current Word's Index In Sentence
+    */
     long long a, b, d, cw, word, last_word, sentence_length = 0, sentence_position = 0;
     long long word_count = 0, last_word_count = 0, sen[MAX_SENTENCE_LENGTH + 1];
+    /*
+    * l1 Starting Position of word in Concatenated Word Vectors in NS
+    * l2 Starting Position of word in Concatenated Word Vectors in CBOW
+    * c Count Mark
+    * target Current Sample in NS
+    * label current Sample's Label in NS
+    */
     long long l1, l2, c, target, label, local_iter = iter;
     unsigned long long next_random = (long long) id;
+    /*
+    * f e^x / (1/e^x)，Probability of Current Code = 0 in HS; Probability of label = 1 in NS
+    * g error(|f - True Value|) * Learning Rate
+    */
     real f, g;
     clock_t now;
 
-    // neu1 is only used by the CBOW architecture.
+    // neu1 is only used by the CBOW architecture (Hidden Node)
     real *neu1 = (real *) calloc(layer1_size, sizeof(real));
 
-    // neu1e is used by both architectures.
+    // neu1e is used by both architectures (Error Accumulation)
     real *neu1e = (real *) calloc(layer1_size, sizeof(real));
 
 
@@ -698,8 +721,9 @@ void *TrainModelThread(void *id) {
                        word_count_actual / ((real) (now - start + 1) / (real) CLOCKS_PER_SEC * 1000));
                 fflush(stdout);
             }
-            alpha = starting_alpha * (1 - word_count_actual / (real) (iter * train_words + 1));
-            if (alpha < starting_alpha * 0.0001) alpha = starting_alpha * 0.0001;
+            alpha = starting_alpha *
+                    (1 - word_count_actual / (real) (iter * train_words + 1)); // Adjusting Learning Rate
+            if (alpha < starting_alpha * 0.0001) alpha = starting_alpha * 0.0001; // Lower Bound of Learning Rate
         }
 
         // This 'if' block retrieves the next sentence from the training text and
@@ -810,6 +834,7 @@ void *TrainModelThread(void *id) {
 
         if (word == -1) continue;
 
+        // Reset Error Accumulation
         for (c = 0; c < layer1_size; c++) neu1[c] = 0;
         for (c = 0; c < layer1_size; c++) neu1e[c] = 0;
 
@@ -827,16 +852,18 @@ void *TrainModelThread(void *id) {
         if (cbow) {  //train the cbow architecture
             // in -> hidden
             cw = 0;
-            for (a = b; a < window * 2 + 1 - b; a++)
+            for (a = b; a < window * 2 + 1 - b; a++) {
                 if (a != window) {
                     c = sentence_position - window + a;
-                    if (c < 0) continue;
-                    if (c >= sentence_length) continue;
+                    if (c < 0) continue; // handle boundary of context at beggining
+                    if (c >= sentence_length) continue; // handle boundary of context word at the end
                     last_word = sen[c];
                     if (last_word == -1) continue;
-                    for (c = 0; c < layer1_size; c++) neu1[c] += syn0[c + last_word * layer1_size];
+                    for (c = 0; c < layer1_size; c++)
+                        neu1[c] += syn0[c + last_word * layer1_size];
                     cw++;
                 }
+            }
             if (cw) {
                 for (c = 0; c < layer1_size; c++) neu1[c] /= cw;
                 if (hs)
@@ -878,6 +905,7 @@ void *TrainModelThread(void *id) {
                         for (c = 0; c < layer1_size; c++) syn1neg[c + l2] += g * neu1[c];
                     }
                 // hidden -> in
+                // Update word vectors According Error Accumulation In Hidden Layer
                 for (a = b; a < window * 2 + 1 - b; a++)
                     if (a != window) {
                         c = sentence_position - window + a;
@@ -885,7 +913,8 @@ void *TrainModelThread(void *id) {
                         if (c >= sentence_length) continue;
                         last_word = sen[c];
                         if (last_word == -1) continue;
-                        for (c = 0; c < layer1_size; c++) syn0[c + last_word * layer1_size] += neu1e[c];
+                        for (c = 0; c < layer1_size; c++)
+                            syn0[c + last_word * layer1_size] += neu1e[c];
                     }
             }
         }
@@ -1322,7 +1351,7 @@ int main(int argc, char **argv) {
     //vocab_hash_size=21M, access to word index easier
     vocab_hash = (int *) calloc(vocab_hash_size, sizeof(int));
 
-    //for computing sigmoid approximately
+    //for computing sigmoid between [-6,6] approximately
     // a table to look up values of sigmoid function quickly
     expTable = (real *) malloc((EXP_TABLE_SIZE + 1) * sizeof(real));
     //[0.002473 , 0.997498]
