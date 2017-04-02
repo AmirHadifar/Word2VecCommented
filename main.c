@@ -120,6 +120,12 @@ real *syn0, *syn1, *syn1neg, *expTable;
 clock_t start;
 
 int hs = 0, negative = 5;
+
+/* ======== table_size ========
+ * Sampling Table Size
+ * ======== table ========
+ * table Sampling Table
+*/
 const int table_size = 1e8;
 int *table;
 
@@ -851,11 +857,11 @@ void *TrainModelThread(void *id) {
          */
         if (cbow) {  //train the cbow architecture
             // in -> hidden
-            cw = 0;
+            cw = 0; // number of context window
             for (a = b; a < window * 2 + 1 - b; a++) {
                 if (a != window) {
                     c = sentence_position - window + a;
-                    if (c < 0) continue; // handle boundary of context at beggining
+                    if (c < 0) continue; // handle boundary of context at begining
                     if (c >= sentence_length) continue; // handle boundary of context word at the end
                     last_word = sen[c];
                     if (last_word == -1) continue;
@@ -865,7 +871,7 @@ void *TrainModelThread(void *id) {
                 }
             }
             if (cw) {
-                for (c = 0; c < layer1_size; c++) neu1[c] /= cw;
+                for (c = 0; c < layer1_size; c++) neu1[c] /= cw; //because in previous step it sum through words now calculate its average
                 if (hs)
                     for (d = 0; d < vocab[word].codelen; d++) {
                         f = 0;
@@ -897,12 +903,21 @@ void *TrainModelThread(void *id) {
                         }
                         l2 = target * layer1_size;
                         f = 0;
-                        for (c = 0; c < layer1_size; c++) f += neu1[c] * syn1neg[c + l2];
+                        // Propagate hidden -> output
+                        // Prepare For Computing f
+                        // f Probability of label = 1 in NS
+                        // g error(|f - True Value|) * Learning Rate
+                        for (c = 0; c < layer1_size; c++)
+                            f += neu1[c] * syn1neg[c + l2];
+
                         if (f > MAX_EXP) g = (label - 1) * alpha;
                         else if (f < -MAX_EXP) g = (label - 0) * alpha;
                         else g = (label - expTable[(int) ((f + MAX_EXP) * (EXP_TABLE_SIZE / MAX_EXP / 2))]) * alpha;
-                        for (c = 0; c < layer1_size; c++) neu1e[c] += g * syn1neg[c + l2];
-                        for (c = 0; c < layer1_size; c++) syn1neg[c + l2] += g * neu1[c];
+
+                        for (c = 0; c < layer1_size; c++)  // Propagate errors output -> hidden
+                            neu1e[c] += g * syn1neg[c + l2];
+                        for (c = 0; c < layer1_size; c++) // Learn weights hidden -> output
+                            syn1neg[c + l2] += g * neu1[c];
                     }
                 // hidden -> in
                 // Update word vectors According Error Accumulation In Hidden Layer
